@@ -46,7 +46,6 @@ def before_test():
 	for modu in frappe.get_all("Module Onboarding"):
 		frappe.db.set_value("Module Onboarding", modu, "is_complete", 1)
 	frappe.set_value("Website Settings", "Website Settings", "home_page", "login")
-	frappe.db.commit()
 
 
 def create_test_data():
@@ -78,8 +77,8 @@ def create_test_data():
 	modify_tax_templates(settings)
 	create_sales_invoices(settings)
 	for month in range(1, 13):
-		create_payroll_journal_entry(settings)
 		settings.day = settings.day.replace(month=month)
+		create_payroll_journal_entry(settings)
 
 
 def create_bank_and_bank_account(settings):
@@ -431,6 +430,8 @@ def create_invoices(settings):
 				"qty": 1,
 			},
 		)
+		if supplier[0].startswith("Sphere"):
+			pi.payment_terms_template = None
 		pi.save()
 		pi.submit()
 	# two electric meters / test invoice aggregation
@@ -651,8 +652,7 @@ def create_payroll_journal_entry(settings):
 	je = frappe.new_doc("Journal Entry")
 	je.entry_type = "Journal Entry"
 	je.company = settings.company
-	je.posting_date = settings.day
-	je.due_date = settings.day
+	je.due_date = je.posting_date = settings.day
 	total_payroll = 0.0
 	for idx, emp in enumerate(emps):
 		employee_name = frappe.get_value(
@@ -717,6 +717,7 @@ def create_payroll_journal_entry(settings):
 	)
 	je.save()
 	je.submit()
+	print(je.posting_date, je.due_date)
 
 
 """
