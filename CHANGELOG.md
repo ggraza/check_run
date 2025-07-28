@@ -302,7 +302,7 @@ Co-authored-by: agritheory <agritheory@users.noreply.github.com>
   ([#142](https://github.com/agritheory/check_run/pull/142),
   [`f07ad5a`](https://github.com/agritheory/check_run/commit/f07ad5a1c4a9b7e424ad534ec40731f26f6feb0c))
 
-- Only increment if check numer is numeric
+- Only increment if check number is numeric
   ([#139](https://github.com/agritheory/check_run/pull/139),
   [`079aa52`](https://github.com/agritheory/check_run/commit/079aa52bf013e13d3350848ef011b74b99b64bf1))
 
