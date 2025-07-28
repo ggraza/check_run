@@ -18,7 +18,7 @@ from frappe.model.document import Document
 from frappe.permissions import has_permission
 from frappe.query_builder.custom import ConstantColumn
 from frappe.query_builder.functions import Coalesce, NullIf, Sum
-from frappe.utils.data import flt, get_datetime, getdate, now, nowdate, add_months, get_last_day
+from frappe.utils.data import add_months, flt, get_datetime, get_last_day, getdate, now, nowdate
 from frappe.utils.file_manager import remove_all, save_file
 from frappe.utils.password import get_decrypted_password
 from frappe.utils.print_format import read_multi_pdf
@@ -574,7 +574,9 @@ def calculate_payment_term_discount(
 		)
 	elif payment_term_doc.discount_validity_based_on == "Month(s) after the end of the invoice month":
 		last_day_of_month = get_last_day(transaction.posting_date)
-		discount_end_date = get_last_day(add_months(last_day_of_month, payment_term_doc.discount_validity))
+		discount_end_date = get_last_day(
+			add_months(last_day_of_month, payment_term_doc.discount_validity)
+		)
 
 	if payment_date > discount_end_date:
 		return 0.0, False
