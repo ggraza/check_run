@@ -349,6 +349,13 @@ class CheckRun(Document):
 					pe.reference_no = frappe._(
 						f"via {_group[0].mode_of_payment} {self.get_formatted('posting_date')}"
 					)
+				
+				total_discount_amount = 0
+				payment_date = (
+					getdate()
+					if settings.set_payment_entry_posting_date == "Use Today's Date"
+					else self.posting_date
+				)
 
 				for reference in group:
 					if not reference:
@@ -360,6 +367,12 @@ class CheckRun(Document):
 					):
 						if frappe.get_value(reference.doctype, reference.name, "on_hold"):
 							frappe.db.set_value(reference.doctype, reference.name, "on_hold", 0)
+					
+					discount_amount = 0.0
+					if reference.doctype == "Purchase Invoice" and reference.payment_term:
+						discount_amount, has_discount = calculate_payment_term_discount(reference, payment_date)
+						total_discount_amount += discount_amount
+					
 					if reference.doctype == "Journal Entry":
 						reference_name = reference.ref_number
 					else:
@@ -386,6 +399,17 @@ class CheckRun(Document):
 				pe.paid_amount = total_amount
 				pe.base_paid_amount = total_amount
 				pe.base_grand_total = total_amount
+
+				if total_discount_amount > 0 and settings.payment_discount_account:
+					pe.append(
+						"deductions",
+						{
+							"account": settings.payment_discount_account,
+							"amount": -total_discount_amount,
+							"cost_center": frappe.get_value("Company", self.company, "cost_center"),
+						},
+					)
+
 				if not pe.get("references"):  # already paid or cancelled
 					continue
 				try:
@@ -813,10 +837,9 @@ def get_entries(doc: CheckRun | str) -> dict:
 	for transaction in transactions:
 		if transaction.doctype == "Purchase Invoice" and transaction.payment_term:
 			discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
-			transaction.amount = transaction.amount - discount_amount
+			transaction.discount_amount = transaction.amount - discount_amount
 			transaction.has_discount = has_discount
 		else:
-			transaction.amount = transaction.amount
 			transaction.has_discount = False
 
 		if file_preview_allowed:
