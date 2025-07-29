@@ -261,6 +261,31 @@ def create_payment_terms_templates(settings):
 			)
 		doc.save()
 
+	if not frappe.db.exists("Payment Terms Template", "2% 10 Net 30"):
+		doc = frappe.new_doc("Payment Terms Template")
+		doc.template_name = "2% 10 Net 30"
+		
+		pt = frappe.new_doc("Payment Term")
+		pt.payment_term_name = "2% 10 Net 30"
+		pt.due_date_based_on = "Day(s) after the end of the invoice month"
+		pt.discount_validity_based_on = "Day(s) after the end of the invoice month"
+		pt.invoice_portion = 100
+		pt.credit_days = 30
+		pt.discount_type = "Percentage"
+		pt.discount = 2.0
+		pt.discount_validity = 10
+		pt.save()
+		doc.append(
+			"terms",
+			{
+				"payment_term": pt.name,
+				"invoice_portion": pt.invoice_portion,
+				"due_date_based_on": pt.due_date_based_on,
+				"credit_days": pt.credit_days,
+			},
+		)
+		doc.save()
+
 
 def create_suppliers(settings):
 	addresses = frappe._dict({})
@@ -486,6 +511,42 @@ def create_invoices(settings):
 	rpi.items[0].rate = 500
 	rpi.save()
 	rpi.submit()
+
+	# has discount
+	pi = frappe.new_doc("Purchase Invoice")
+	pi.company = settings.company
+	pi.set_posting_time = 1
+	pi.posting_date = datetime.date.today() - datetime.timedelta(days=7)
+	pi.supplier = suppliers[0][0]
+	pi.payment_terms_template = "2% 10 Net 30"
+	pi.append(
+		"items",
+		{
+			"item_code": suppliers[0][1],
+			"rate": 200.00,
+			"qty": 1,
+		},
+	)
+	pi.save()
+	pi.submit()
+
+	# hasn't discount
+	pi = frappe.new_doc("Purchase Invoice")
+	pi.company = settings.company
+	pi.set_posting_time = 1
+	pi.posting_date = datetime.date.today() - datetime.timedelta(days=45)
+	pi.supplier = suppliers[1][0]
+	pi.payment_terms_template = "2% 10 Net 30"
+	pi.append(
+		"items",
+		{
+			"item_code": suppliers[1][1],
+			"rate": 300.00,
+			"qty": 1,
+		},
+	)
+	pi.save()
+	pi.submit()
 
 
 def validate_release_date(self):
