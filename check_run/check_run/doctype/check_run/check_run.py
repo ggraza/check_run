@@ -351,12 +351,6 @@ class CheckRun(Document):
 					)
 
 				total_discount_amount = 0.0
-				payment_date = (
-					getdate()
-					if settings.set_payment_entry_posting_date == "Use Today's Date"
-					else self.posting_date
-				)
-
 				for reference in group:
 					if not reference:
 						continue
@@ -370,7 +364,7 @@ class CheckRun(Document):
 
 					discount_amount = 0.0
 					if reference.doctype == "Purchase Invoice" and reference.payment_term:
-						discount_amount, has_discount = calculate_payment_term_discount(reference, payment_date)
+						discount_amount, has_discount = calculate_payment_term_discount(reference, self.posting_date)
 						total_discount_amount += discount_amount
 
 					if reference.doctype == "Journal Entry":
@@ -576,10 +570,7 @@ class CheckRun(Document):
 		)
 
 
-def calculate_payment_term_discount(
-	transaction,
-	payment_date: datetime.date,
-) -> tuple[float, bool]:
+def calculate_payment_term_discount(transaction, payment_date):
 	if not transaction.payment_term:
 		return 0.0, False
 
@@ -828,15 +819,10 @@ def get_entries(doc: CheckRun | str) -> dict:
 
 	file_preview_allowed = False if len(transactions) > settings.file_preview_threshold else True
 
-	payment_date = (
-		getdate()
-		if settings and settings.set_payment_entry_posting_date == "Use Today's Date"
-		else doc.posting_date  # type: ignore
-	)
-
+	print("\npayment_date", settings.set_payment_entry_posting_date, doc.posting_date)
 	for transaction in transactions:
 		if transaction.doctype == "Purchase Invoice" and transaction.payment_term:
-			discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
+			discount_amount, has_discount = calculate_payment_term_discount(transaction, doc.posting_date)
 			transaction.discount_amount = transaction.amount - discount_amount
 			transaction.has_discount = has_discount
 		else:
