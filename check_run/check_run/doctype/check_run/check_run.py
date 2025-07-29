@@ -819,10 +819,10 @@ def get_entries(doc: CheckRun | str) -> dict:
 
 	file_preview_allowed = False if len(transactions) > settings.file_preview_threshold else True
 
-	print("\npayment_date", settings.set_payment_entry_posting_date, doc.posting_date)
 	for transaction in transactions:
-		if transaction.doctype == "Purchase Invoice" and transaction.payment_term:
-			discount_amount, has_discount = calculate_payment_term_discount(transaction, doc.posting_date)
+		posting_date = getattr(doc, "posting_date", None)
+		if transaction.doctype == "Purchase Invoice" and transaction.payment_term and posting_date:
+			discount_amount, has_discount = calculate_payment_term_discount(transaction, posting_date)
 			transaction.discount_amount = transaction.amount - discount_amount
 			transaction.has_discount = has_discount
 		else:

@@ -264,7 +264,7 @@ def create_payment_terms_templates(settings):
 	if not frappe.db.exists("Payment Terms Template", "2% 10 Net 30"):
 		doc = frappe.new_doc("Payment Terms Template")
 		doc.template_name = "2% 10 Net 30"
-		
+
 		pt = frappe.new_doc("Payment Term")
 		pt.payment_term_name = "2% 10 Net 30"
 		pt.due_date_based_on = "Day(s) after the end of the invoice month"
