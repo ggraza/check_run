@@ -349,8 +349,8 @@ class CheckRun(Document):
 					pe.reference_no = frappe._(
 						f"via {_group[0].mode_of_payment} {self.get_formatted('posting_date')}"
 					)
-				
-				total_discount_amount = 0
+
+				total_discount_amount = 0.0
 				payment_date = (
 					getdate()
 					if settings.set_payment_entry_posting_date == "Use Today's Date"
@@ -367,12 +367,12 @@ class CheckRun(Document):
 					):
 						if frappe.get_value(reference.doctype, reference.name, "on_hold"):
 							frappe.db.set_value(reference.doctype, reference.name, "on_hold", 0)
-					
+
 					discount_amount = 0.0
 					if reference.doctype == "Purchase Invoice" and reference.payment_term:
 						discount_amount, has_discount = calculate_payment_term_discount(reference, payment_date)
 						total_discount_amount += discount_amount
-					
+
 					if reference.doctype == "Journal Entry":
 						reference_name = reference.ref_number
 					else:
