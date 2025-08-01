@@ -59,6 +59,7 @@ class CheckRun(Document):
 		self.set_onload(
 			"is_approver_user", settings.approver_role in frappe.get_roles(frappe.session.user)
 		)
+		self.set_onload("payment_discount_account", getattr(settings, "payment_discount_account", None))
 
 	def validate(self) -> None:
 		gl_account = frappe.get_value("Bank Account", self.bank_account, "account")
@@ -388,11 +389,11 @@ class CheckRun(Document):
 					total_amount += reference.amount
 					reference.check_number = pe.reference_no
 					_references.append(reference)
-				pe.received_amount = total_amount
-				pe.base_received_amount = total_amount
-				pe.paid_amount = total_amount
-				pe.base_paid_amount = total_amount
-				pe.base_grand_total = total_amount
+				pe.received_amount = total_amount - total_discount_amount
+				pe.base_received_amount = total_amount - total_discount_amount
+				pe.paid_amount = total_amount - total_discount_amount
+				pe.base_paid_amount = total_amount - total_discount_amount
+				pe.base_grand_total = total_amount - total_discount_amount
 
 				if total_discount_amount > 0 and settings.payment_discount_account:
 					pe.append(
