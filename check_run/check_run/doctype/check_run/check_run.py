@@ -579,17 +579,21 @@ def calculate_payment_term_discount(transaction, payment_date):
 	if not payment_term_doc.discount or payment_term_doc.discount <= 0:
 		return 0.0, False
 
+	posting_date = (
+		getdate(transaction.posting_date)
+		if isinstance(transaction.posting_date, str)
+		else transaction.posting_date
+	)
+
 	if payment_term_doc.discount_validity_based_on == "Day(s) after invoice date":
-		discount_end_date = transaction.posting_date + datetime.timedelta(
-			days=payment_term_doc.discount_validity
-		)
+		discount_end_date = posting_date + datetime.timedelta(days=payment_term_doc.discount_validity)
 	elif payment_term_doc.discount_validity_based_on == "Day(s) after the end of the invoice month":
-		last_day_of_month = get_last_day(transaction.posting_date)
+		last_day_of_month = get_last_day(posting_date)
 		discount_end_date = last_day_of_month + datetime.timedelta(
 			days=payment_term_doc.discount_validity
 		)
 	elif payment_term_doc.discount_validity_based_on == "Month(s) after the end of the invoice month":
-		last_day_of_month = get_last_day(transaction.posting_date)
+		last_day_of_month = get_last_day(posting_date)
 		discount_end_date = get_last_day(
 			add_months(last_day_of_month, payment_term_doc.discount_validity)
 		)
