@@ -287,17 +287,25 @@ def test_calculate_payment_term_discount_function():
 	]
 
 	for case in cases:
-		transaction = _dict({
-			"name": f"Test-{case['desc']}",
-			"payment_term": case["payment_term"],
-			"amount": case["amount"],
-			"posting_date": case["posting_date"],
-		})
+		transaction = _dict(
+			{
+				"name": f"Test-{case['desc']}",
+				"payment_term": case["payment_term"],
+				"amount": case["amount"],
+				"posting_date": case["posting_date"],
+			}
+		)
 		payment_date = datetime.date.today()
 		discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
 
-		assert abs(discount_amount - case["expected_discount"]) < 0.01, f"{case['desc']}: expected {case['expected_discount']}, obtained {discount_amount}"
-		assert has_discount == case["should_have_discount"], f"{case['desc']}: expected has_discount={case['should_have_discount']}, obtained {has_discount}"
+		assert (
+			abs(discount_amount - case["expected_discount"]) < 0.01
+		), f"{case['desc']}: expected {case['expected_discount']}, obtained {discount_amount}"
+		assert (
+			has_discount == case["should_have_discount"]
+		), (
+			f"{case['desc']}: expected has_discount={case['should_have_discount']}, obtained {has_discount}"
+		)
 
 
 @pytest.mark.order(19)
