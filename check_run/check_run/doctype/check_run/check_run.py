@@ -828,7 +828,7 @@ def get_entries(doc: CheckRun | str) -> dict:
 	for transaction in transactions:
 		if transaction.doctype == "Purchase Invoice" and transaction.payment_term and posting_date:
 			discount_amount, has_discount = calculate_payment_term_discount(transaction, posting_date)
-			transaction.discount_amount = transaction.amount - discount_amount
+			transaction.discount_amount = transaction.amount - discount_amount if has_discount else 0.0
 			transaction.has_discount = has_discount
 		else:
 			transaction.has_discount = False

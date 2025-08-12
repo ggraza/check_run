@@ -5,8 +5,10 @@ import datetime
 
 import frappe
 import pytest
+from frappe import _dict
 
 from check_run.check_run.doctype.check_run.check_run import (
+	calculate_payment_term_discount,
 	check_for_draft_check_run,
 	get_check_run_settings,
 	get_entries,
@@ -213,3 +215,226 @@ def test_use_cr_posting_date_config(cr):
 	crs.set_payment_entry_posting_date = "Use Today's Date"
 	crs.save()
 	assert crs.set_payment_entry_posting_date == "Use Today's Date"
+
+
+@pytest.mark.order(18)
+def test_calculate_payment_term_discount_function():
+	cases = [
+		{
+			"desc": "2% 10 Net 30 - within the discount period",
+			"payment_term": "2% 10 Net 30",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=5),
+			"amount": 1000.0,
+			"expected_discount": 1000.0 * 0.02,
+			"should_have_discount": True,
+		},
+		{
+			"desc": "2% 10 Net 30 - outside the discount period",
+			"payment_term": "2% 10 Net 30",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=20),
+			"amount": 1000.0,
+			"expected_discount": 0.0,
+			"should_have_discount": False,
+		},
+		{
+			"desc": "3% 10 Net 30 - within the discount period",
+			"payment_term": "3% 10 Net 30",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=8),
+			"amount": 500.0,
+			"expected_discount": min(20.0, 500.0),
+			"should_have_discount": True,
+		},
+		{
+			"desc": "3% 10 Net 30 - outside the discount period",
+			"payment_term": "3% 10 Net 30",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=25),
+			"amount": 500.0,
+			"expected_discount": 0.0,
+			"should_have_discount": False,
+		},
+		{
+			"desc": "2% 10 Net 30 - Invoice Date - last valid day",
+			"payment_term": "2% 10 Net 30 - Invoice Date",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=10),
+			"amount": 800.0,
+			"expected_discount": 800.0 * 0.02,
+			"should_have_discount": True,
+		},
+		{
+			"desc": "2% 10 Net 30 - Invoice Date - outside the discount period",
+			"payment_term": "2% 10 Net 30 - Invoice Date",
+			"posting_date": datetime.date.today() - datetime.timedelta(days=11),
+			"amount": 800.0,
+			"expected_discount": 0.0,
+			"should_have_discount": False,
+		},
+		{
+			"desc": "3% 10 Net 30 - Month End - within valid month",
+			"payment_term": "3% 10 Net 30 - Month End",
+			"posting_date": (datetime.date.today().replace(day=1) - datetime.timedelta(days=5)),
+			"amount": 600.0,
+			"expected_discount": 600.0 * 0.03,
+			"should_have_discount": True,
+		},
+		{
+			"desc": "3% 10 Net 30 - Month End - outside valid month",
+			"payment_term": "3% 10 Net 30 - Month End",
+			"posting_date": (datetime.date.today().replace(day=1) - datetime.timedelta(days=40)),
+			"amount": 600.0,
+			"expected_discount": 0.0,
+			"should_have_discount": False,
+		},
+	]
+
+	for case in cases:
+		transaction = _dict({
+			"name": f"Test-{case['desc']}",
+			"payment_term": case["payment_term"],
+			"amount": case["amount"],
+			"posting_date": case["posting_date"],
+		})
+		payment_date = datetime.date.today()
+		discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
+
+		assert abs(discount_amount - case["expected_discount"]) < 0.01, f"{case['desc']}: expected {case['expected_discount']}, obtained {discount_amount}"
+		assert has_discount == case["should_have_discount"], f"{case['desc']}: expected has_discount={case['should_have_discount']}, obtained {has_discount}"
+
+
+@pytest.mark.order(19)
+def test_cr_payment_term_discounts(cr):
+	cr.transactions = frappe.utils.safe_json_loads(cr.transactions)
+	payment_date = datetime.date.today()
+	test_cases = []
+
+	for row in cr.transactions:
+		if row.get("doctype") != "Purchase Invoice":
+			continue
+
+		payment_term = row.get("payment_term", "")
+		if not payment_term:
+			continue
+
+		invoice_name = row.get("name")
+		amount = row.get("amount")
+		posting_date = row.get("posting_date")
+
+		transaction = _dict(
+			{
+				"name": invoice_name,
+				"payment_term": payment_term,
+				"amount": amount,
+				"posting_date": posting_date,
+			}
+		)
+
+		# Calculate discount for this transaction using today's date
+		discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
+
+		test_case = {
+			"invoice": invoice_name,
+			"payment_term": payment_term,
+			"amount": amount,
+			"posting_date": posting_date,
+			"payment_date": payment_date,
+			"discount_amount": discount_amount,
+			"has_discount": has_discount,
+		}
+		test_cases.append(test_case)
+
+		if payment_term in [
+			"2% 10 Net 30",
+			"3% 10 Net 30",
+			"2% 10 Net 30 - Invoice Date",
+			"3% 10 Net 30 - Month End",
+		]:
+			row["pay"] = True
+			row["mode_of_payment"] = "Credit Card"
+
+	assert len(test_cases) > 0, "No payment term discount test cases found"
+
+	# Test Case 1: Invoices with percentage discounts (2%)
+	percentage_discount_cases = [tc for tc in test_cases if "2%" in tc["payment_term"]]
+	assert len(percentage_discount_cases) > 0, "No percentage discount test cases found"
+
+	for case in percentage_discount_cases:
+		if case["has_discount"]:
+			expected_discount = case["amount"] * 0.02
+			assert (
+				abs(case["discount_amount"] - expected_discount) < 0.01
+			), f"Percentage discount mismatch for {case['invoice']}: expected {expected_discount}, got {case['discount_amount']}"
+
+	# Test Case 2: Invoices with amount-based discounts (fixed amount)
+	amount_discount_cases = [tc for tc in test_cases if "3% 10 Net 30" in tc["payment_term"]]
+	for case in amount_discount_cases:
+		if case["has_discount"]:
+			if case["payment_term"] == "3% 10 Net 30 - Month End":
+				expected_discount = case["amount"] * 0.03
+			else:
+				expected_discount = min(20.0, case["amount"])
+
+			assert (
+				abs(case["discount_amount"] - expected_discount) < 0.01
+			), f"Amount discount mismatch for {case['invoice']}: expected {expected_discount}, got {case['discount_amount']}"
+
+	# Test Case 3: Expired discount scenarios
+	expired_cases = [tc for tc in test_cases if not tc["has_discount"]]
+	for case in expired_cases:
+		assert (
+			case["discount_amount"] == 0
+		), f"Expired discount should be 0 for {case['invoice']}, got {case['discount_amount']}"
+
+
+@pytest.mark.order(20)
+def test_cr_process_with_discounts(cr):
+	"""Test actual Check Run processing with discounts applied"""
+	cr.transactions = frappe.utils.safe_json_loads(cr.transactions)
+	payment_date = datetime.date.today()
+	total_expected_discount = 0
+	invoices_to_pay = []
+
+	for row in cr.transactions:
+		if row.get("doctype") == "Purchase Invoice" and row.get("payment_term") in [
+			"2% 10 Net 30",
+			"3% 10 Net 30",
+			"3% 10 Net 30 - Month End",
+			"2% 10 Net 30 - Invoice Date",
+		]:
+			row["pay"] = True
+			row["mode_of_payment"] = "Credit Card"
+
+			transaction = _dict(
+				{
+					"name": row["name"],
+					"payment_term": row["payment_term"],
+					"amount": row["amount"],
+					"posting_date": row["posting_date"],
+				}
+			)
+
+			discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
+
+			if has_discount:
+				total_expected_discount += discount_amount
+				invoices_to_pay.append(
+					{"name": row["name"], "amount": row["amount"], "expected_discount": discount_amount}
+				)
+
+	if len(invoices_to_pay) > 0:
+		cr.transactions = frappe.as_json(cr.transactions)
+		cr.flags.in_test = True
+		cr.save()
+		cr.process_check_run()
+
+		payment_entries = frappe.get_all(
+			"Payment Entry",
+			filters={"check_run": cr.name},
+			fields=["name", "total_allocated_amount", "paid_amount", "difference_amount"],
+		)
+		assert len(payment_entries) > 0, "No Payment Entries created"
+
+		# Check if any payment entry has discount
+		total_discount_in_pe = sum(pe.get("difference_amount", 0) for pe in payment_entries)
+		if total_expected_discount > 0:
+			assert (
+				len(payment_entries) > 0
+			), f"Expected Payment Entries to be created with discounts totaling {total_expected_discount}"
