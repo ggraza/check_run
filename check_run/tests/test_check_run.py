@@ -225,12 +225,12 @@ def test_calculate_payment_term_discount_function():
 	last_month = first_of_current_month - datetime.timedelta(days=1)
 	first_of_last_month = last_month.replace(day=1)
 	last_day_of_last_month = last_month
-	
+
 	# Simulate being on the 9th day of current month (within 10-day discount period)
 	simulated_today_within = first_of_current_month + datetime.timedelta(days=8)  # day 9
 	# Simulate being on the 12th day of current month (outside 10-day discount period)
 	simulated_today_outside = first_of_current_month + datetime.timedelta(days=11)  # day 12
-	
+
 	cases = [
 		{
 			"desc": "2% 10 Net 30 - within the discount period",
