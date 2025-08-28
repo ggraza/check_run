@@ -286,12 +286,12 @@ def create_payment_terms_templates(settings):
 		)
 		doc.save()
 
-	if not frappe.db.exists("Payment Terms Template", "3% 10 Net 30"):
+	if not frappe.db.exists("Payment Terms Template", "$20 10 Net 30"):
 		doc = frappe.new_doc("Payment Terms Template")
-		doc.template_name = "3% 10 Net 30"
+		doc.template_name = "$20 10 Net 30"
 
 		pt = frappe.new_doc("Payment Term")
-		pt.payment_term_name = "3% 10 Net 30"
+		pt.payment_term_name = "$20 10 Net 30"
 		pt.due_date_based_on = "Day(s) after the end of the invoice month"
 		pt.discount_validity_based_on = "Day(s) after the end of the invoice month"
 		pt.invoice_portion = 100
@@ -338,12 +338,12 @@ def create_payment_terms_templates(settings):
 		doc.save()
 
 	# Payment term with "Month(s) after the end of the invoice month" for discount validity
-	if not frappe.db.exists("Payment Terms Template", "3% 10 Net 30 - Month End"):
+	if not frappe.db.exists("Payment Terms Template", "3% Net 30"):
 		doc = frappe.new_doc("Payment Terms Template")
-		doc.template_name = "3% 10 Net 30 - Month End"
+		doc.template_name = "3% Net 30"
 
 		pt = frappe.new_doc("Payment Term")
-		pt.payment_term_name = "3% 10 Net 30 - Month End"
+		pt.payment_term_name = "3% Net 30"
 		pt.due_date_based_on = "Month(s) after the end of the invoice month"
 		pt.discount_validity_based_on = "Month(s) after the end of the invoice month"
 		pt.invoice_portion = 100
@@ -613,7 +613,7 @@ def create_invoices(settings):
 	pi.set_posting_time = 1
 	pi.posting_date = datetime.date.today() - datetime.timedelta(days=5)
 	pi.supplier = suppliers[3][0]
-	pi.payment_terms_template = "3% 10 Net 30"
+	pi.payment_terms_template = "$20 10 Net 30"
 	pi.append(
 		"items",
 		{
@@ -686,7 +686,7 @@ def create_invoices(settings):
 	pi.set_posting_time = 1
 	pi.posting_date = first_of_month - datetime.timedelta(days=5)  # Previous month
 	pi.supplier = suppliers[1][0]
-	pi.payment_terms_template = "3% 10 Net 30 - Month End"
+	pi.payment_terms_template = "3% Net 30"
 	pi.append(
 		"items",
 		{
@@ -704,7 +704,7 @@ def create_invoices(settings):
 	pi.set_posting_time = 1
 	pi.posting_date = datetime.date.today() - datetime.timedelta(days=5)
 	pi.supplier = suppliers[0][0]
-	pi.payment_terms_template = "3% 10 Net 30"
+	pi.payment_terms_template = "$20 10 Net 30"
 	pi.append(
 		"items",
 		{

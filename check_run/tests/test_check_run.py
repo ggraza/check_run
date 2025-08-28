@@ -219,11 +219,24 @@ def test_use_cr_posting_date_config(cr):
 
 @pytest.mark.order(18)
 def test_calculate_payment_term_discount_function():
+	# Create precise dates to test edge cases
+	today = datetime.date.today()
+	first_of_current_month = today.replace(day=1)
+	last_month = first_of_current_month - datetime.timedelta(days=1)
+	first_of_last_month = last_month.replace(day=1)
+	last_day_of_last_month = last_month
+	
+	# Simulate being on the 9th day of current month (within 10-day discount period)
+	simulated_today_within = first_of_current_month + datetime.timedelta(days=8)  # day 9
+	# Simulate being on the 12th day of current month (outside 10-day discount period)
+	simulated_today_outside = first_of_current_month + datetime.timedelta(days=11)  # day 12
+	
 	cases = [
 		{
 			"desc": "2% 10 Net 30 - within the discount period",
 			"payment_term": "2% 10 Net 30",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=5),
+			"posting_date": first_of_last_month,  # Invoice on 1st of previous month
+			"payment_date": simulated_today_within,  # Payment on 9th of current month
 			"amount": 1000.0,
 			"expected_discount": 1000.0 * 0.02,
 			"should_have_discount": True,
@@ -231,23 +244,26 @@ def test_calculate_payment_term_discount_function():
 		{
 			"desc": "2% 10 Net 30 - outside the discount period",
 			"payment_term": "2% 10 Net 30",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=20),
+			"posting_date": first_of_last_month,  # Invoice on 1st of previous month
+			"payment_date": simulated_today_outside,  # Payment on 12th of current month (outside period)
 			"amount": 1000.0,
 			"expected_discount": 0.0,
 			"should_have_discount": False,
 		},
 		{
-			"desc": "3% 10 Net 30 - within the discount period",
-			"payment_term": "3% 10 Net 30",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=8),
+			"desc": "$20 10 Net 30 - within the discount period",
+			"payment_term": "$20 10 Net 30",
+			"posting_date": last_day_of_last_month,  # Invoice on last day of previous month
+			"payment_date": simulated_today_within,  # Payment on 9th of current month
 			"amount": 500.0,
 			"expected_discount": min(20.0, 500.0),
 			"should_have_discount": True,
 		},
 		{
-			"desc": "3% 10 Net 30 - outside the discount period",
-			"payment_term": "3% 10 Net 30",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=25),
+			"desc": "$20 10 Net 30 - outside the discount period",
+			"payment_term": "$20 10 Net 30",
+			"posting_date": last_day_of_last_month,  # Invoice on last day of previous month
+			"payment_date": simulated_today_outside,  # Payment on 12th of current month (outside period)
 			"amount": 500.0,
 			"expected_discount": 0.0,
 			"should_have_discount": False,
@@ -255,7 +271,8 @@ def test_calculate_payment_term_discount_function():
 		{
 			"desc": "2% 10 Net 30 - Invoice Date - last valid day",
 			"payment_term": "2% 10 Net 30 - Invoice Date",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=10),
+			"posting_date": today - datetime.timedelta(days=10),  # Exactly 10 days ago
+			"payment_date": today,
 			"amount": 800.0,
 			"expected_discount": 800.0 * 0.02,
 			"should_have_discount": True,
@@ -263,23 +280,26 @@ def test_calculate_payment_term_discount_function():
 		{
 			"desc": "2% 10 Net 30 - Invoice Date - outside the discount period",
 			"payment_term": "2% 10 Net 30 - Invoice Date",
-			"posting_date": datetime.date.today() - datetime.timedelta(days=11),
+			"posting_date": today - datetime.timedelta(days=11),  # 11 days ago (outside period)
+			"payment_date": today,
 			"amount": 800.0,
 			"expected_discount": 0.0,
 			"should_have_discount": False,
 		},
 		{
-			"desc": "3% 10 Net 30 - Month End - within valid month",
-			"payment_term": "3% 10 Net 30 - Month End",
-			"posting_date": (datetime.date.today().replace(day=1) - datetime.timedelta(days=5)),
+			"desc": "3% Net 30 - within valid month",
+			"payment_term": "3% Net 30",
+			"posting_date": first_of_last_month,  # Invoice from previous month
+			"payment_date": today,  # Payment today (within validity month)
 			"amount": 600.0,
 			"expected_discount": 600.0 * 0.03,
 			"should_have_discount": True,
 		},
 		{
-			"desc": "3% 10 Net 30 - Month End - outside valid month",
-			"payment_term": "3% 10 Net 30 - Month End",
-			"posting_date": (datetime.date.today().replace(day=1) - datetime.timedelta(days=40)),
+			"desc": "3% Net 30 - outside valid month",
+			"payment_term": "3% Net 30",
+			"posting_date": first_of_last_month - datetime.timedelta(days=32),  # Invoice from 2 months ago
+			"payment_date": today,  # Payment today (outside validity month)
 			"amount": 600.0,
 			"expected_discount": 0.0,
 			"should_have_discount": False,
@@ -295,7 +315,7 @@ def test_calculate_payment_term_discount_function():
 				"posting_date": case["posting_date"],
 			}
 		)
-		payment_date = datetime.date.today()
+		payment_date = case["payment_date"]
 		discount_amount, has_discount = calculate_payment_term_discount(transaction, payment_date)
 
 		assert (
@@ -351,9 +371,9 @@ def test_cr_payment_term_discounts(cr):
 
 		if payment_term in [
 			"2% 10 Net 30",
-			"3% 10 Net 30",
+			"$20 10 Net 30",
 			"2% 10 Net 30 - Invoice Date",
-			"3% 10 Net 30 - Month End",
+			"3% Net 30",
 		]:
 			row["pay"] = True
 			row["mode_of_payment"] = "Credit Card"
@@ -372,10 +392,10 @@ def test_cr_payment_term_discounts(cr):
 			), f"Percentage discount mismatch for {case['invoice']}: expected {expected_discount}, got {case['discount_amount']}"
 
 	# Test Case 2: Invoices with amount-based discounts (fixed amount)
-	amount_discount_cases = [tc for tc in test_cases if "3% 10 Net 30" in tc["payment_term"]]
+	amount_discount_cases = [tc for tc in test_cases if "$20 10 Net 30" in tc["payment_term"]]
 	for case in amount_discount_cases:
 		if case["has_discount"]:
-			if case["payment_term"] == "3% 10 Net 30 - Month End":
+			if case["payment_term"] == "3% Net 30":
 				expected_discount = case["amount"] * 0.03
 			else:
 				expected_discount = min(20.0, case["amount"])
@@ -403,8 +423,8 @@ def test_cr_process_with_discounts(cr):
 	for row in cr.transactions:
 		if row.get("doctype") == "Purchase Invoice" and row.get("payment_term") in [
 			"2% 10 Net 30",
-			"3% 10 Net 30",
-			"3% 10 Net 30 - Month End",
+			"$20 10 Net 30",
+			"3% Net 30",
 			"2% 10 Net 30 - Invoice Date",
 		]:
 			row["pay"] = True
