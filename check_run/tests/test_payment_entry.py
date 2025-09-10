@@ -13,7 +13,7 @@ from check_run.tests.test_check_run import cr  # noqa
 year = datetime.date.today().year
 
 
-@pytest.mark.order(20)
+@pytest.mark.order(30)
 def test_partial_payment_payment_entry_with_terms():
 	pi_name = frappe.get_all(
 		"Purchase Invoice",
@@ -49,7 +49,7 @@ def test_partial_payment_payment_entry_with_terms():
 	assert pi.outstanding_amount == 0.0
 
 
-@pytest.mark.order(21)
+@pytest.mark.order(31)
 def test_payment_payment_entry_of_multiple_terms():
 	pi_name = frappe.get_all(
 		"Purchase Invoice",
@@ -79,7 +79,7 @@ def test_payment_payment_entry_of_multiple_terms():
 	assert pi.payment_schedule[0].outstanding == 1666.67
 
 
-@pytest.mark.order(22)
+@pytest.mark.order(32)
 def test_partial_payment_payment_entry_without_terms():
 	pi_name = frappe.get_all(
 		"Purchase Invoice",
@@ -142,7 +142,7 @@ def test_partial_payment_payment_entry_without_terms():
 	assert pi.outstanding_amount == 0.00
 
 
-@pytest.mark.order(23)
+@pytest.mark.order(33)
 def test_outstanding_amount_in_check_run(cr):
 	pi_name = frappe.get_all(
 		"Purchase Invoice",

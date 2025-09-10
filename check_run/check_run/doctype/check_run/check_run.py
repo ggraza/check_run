@@ -18,7 +18,7 @@ from frappe.model.document import Document
 from frappe.permissions import has_permission
 from frappe.query_builder.custom import ConstantColumn
 from frappe.query_builder.functions import Coalesce, NullIf, Sum
-from frappe.utils.data import flt, get_datetime, getdate, now, nowdate
+from frappe.utils.data import add_months, flt, get_datetime, get_last_day, getdate, now, nowdate
 from frappe.utils.file_manager import remove_all, save_file
 from frappe.utils.password import get_decrypted_password
 from frappe.utils.print_format import read_multi_pdf
@@ -59,6 +59,7 @@ class CheckRun(Document):
 		self.set_onload(
 			"is_approver_user", settings.approver_role in frappe.get_roles(frappe.session.user)
 		)
+		self.set_onload("payment_discount_account", getattr(settings, "payment_discount_account", None))
 
 	def validate(self) -> None:
 		gl_account = frappe.get_value("Bank Account", self.bank_account, "account")
@@ -350,6 +351,7 @@ class CheckRun(Document):
 						f"via {_group[0].mode_of_payment} {self.get_formatted('posting_date')}"
 					)
 
+				total_discount_amount = 0.0
 				for reference in group:
 					if not reference:
 						continue
@@ -360,6 +362,12 @@ class CheckRun(Document):
 					):
 						if frappe.get_value(reference.doctype, reference.name, "on_hold"):
 							frappe.db.set_value(reference.doctype, reference.name, "on_hold", 0)
+
+					discount_amount = 0.0
+					if reference.doctype == "Purchase Invoice" and reference.payment_term:
+						discount_amount, has_discount = calculate_payment_term_discount(reference, self.posting_date)
+						total_discount_amount += discount_amount
+
 					if reference.doctype == "Journal Entry":
 						reference_name = reference.ref_number
 					else:
@@ -381,11 +389,22 @@ class CheckRun(Document):
 					total_amount += reference.amount
 					reference.check_number = pe.reference_no
 					_references.append(reference)
-				pe.received_amount = total_amount
-				pe.base_received_amount = total_amount
-				pe.paid_amount = total_amount
-				pe.base_paid_amount = total_amount
-				pe.base_grand_total = total_amount
+				pe.received_amount = total_amount - total_discount_amount
+				pe.base_received_amount = total_amount - total_discount_amount
+				pe.paid_amount = total_amount - total_discount_amount
+				pe.base_paid_amount = total_amount - total_discount_amount
+				pe.base_grand_total = total_amount - total_discount_amount
+
+				if total_discount_amount > 0 and settings.payment_discount_account:
+					pe.append(
+						"deductions",
+						{
+							"account": settings.payment_discount_account,
+							"amount": -total_discount_amount,
+							"cost_center": frappe.get_value("Company", self.company, "cost_center"),
+						},
+					)
+
 				if not pe.get("references"):  # already paid or cancelled
 					continue
 				try:
@@ -550,6 +569,45 @@ class CheckRun(Document):
 			False,
 			0,
 		)
+
+
+def calculate_payment_term_discount(transaction, payment_date):
+	if not transaction.payment_term:
+		return 0.0, False
+
+	payment_term_doc = frappe.get_doc("Payment Term", transaction.payment_term)
+	if not payment_term_doc.discount or payment_term_doc.discount <= 0:
+		return 0.0, False
+
+	posting_date = (
+		getdate(transaction.posting_date)
+		if isinstance(transaction.posting_date, str)
+		else transaction.posting_date
+	)
+
+	if payment_term_doc.discount_validity_based_on == "Day(s) after invoice date":
+		discount_end_date = posting_date + datetime.timedelta(days=payment_term_doc.discount_validity)
+	elif payment_term_doc.discount_validity_based_on == "Day(s) after the end of the invoice month":
+		last_day_of_month = get_last_day(posting_date)
+		discount_end_date = last_day_of_month + datetime.timedelta(
+			days=payment_term_doc.discount_validity
+		)
+	elif payment_term_doc.discount_validity_based_on == "Month(s) after the end of the invoice month":
+		last_day_of_month = get_last_day(posting_date)
+		discount_end_date = get_last_day(
+			add_months(last_day_of_month, payment_term_doc.discount_validity)
+		)
+
+	if payment_date > discount_end_date:
+		return 0.0, False
+
+	discount_amount = 0.0
+	if payment_term_doc.discount_type == "Percentage":
+		discount_amount = transaction.amount * (payment_term_doc.discount / 100)
+	else:
+		discount_amount = min(payment_term_doc.discount, transaction.amount)
+
+	return discount_amount, True
 
 
 @frappe.whitelist()
@@ -766,7 +824,15 @@ def get_entries(doc: CheckRun | str) -> dict:
 
 	file_preview_allowed = False if len(transactions) > settings.file_preview_threshold else True
 
+	posting_date = getattr(doc, "posting_date", None)
 	for transaction in transactions:
+		if transaction.doctype == "Purchase Invoice" and transaction.payment_term and posting_date:
+			discount_amount, has_discount = calculate_payment_term_discount(transaction, posting_date)
+			transaction.discount_amount = transaction.amount - discount_amount if has_discount else 0.0
+			transaction.has_discount = has_discount
+		else:
+			transaction.has_discount = False
+
 		if file_preview_allowed:
 			doc_name = transaction.ref_number if transaction.ref_number else transaction.name
 			transaction.attachments = [
@@ -795,6 +861,14 @@ def get_entries(doc: CheckRun | str) -> dict:
 
 		if transaction.due_date and settings.show_due_date == "Show Days Past Due":
 			transaction.due_date = (getdate(nowdate()) - transaction.due_date).days
+
+	has_discounts = any(t.get("has_discount") for t in transactions)
+	if has_discounts and settings and not settings.payment_discount_account:
+		frappe.throw(
+			frappe._(
+				"Payment Discount Account is required in Check Run Settings when processing invoices with payment term discounts. Please configure the Payment Discount Account in Check Run Settings."
+			)
+		)
 
 	outstanding_transaction = []
 	if not isinstance(doc, CheckRun):

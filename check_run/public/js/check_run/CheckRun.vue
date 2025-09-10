@@ -154,8 +154,11 @@
 							</select>
 							<span v-else>{{ transactions[item.name].mode_of_payment }}</span>
 						</td>
-						<td>{{ format_currency(item.amount, frm.pay_to_account_currency, 2) }}</td>
-						<td>{{ item.due_date }}</td>
+						<td v-if="item.has_discount">
+							{{ format_currency(item.discount_amount, frm.pay_to_account_currency, 2) }}
+						</td>
+						<td v-else>{{ format_currency(item.amount, frm.pay_to_account_currency, 2) }}</td>
+						<td>{{ datetime.str_to_user(item.due_date) }}</td>
 						<td v-if="item.on_hold && frm.settings.automatically_release_on_hold_invoices == 0">
 							<span style="font-weight: bold">On Hold</span>
 						</td>
