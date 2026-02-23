@@ -1465,7 +1465,3 @@ Co-authored-by: fproldan &lt;fproldan@users.noreply.github.com&gt; ([`a698431`](
 * look up party on PE submission to avoid renaming problems ([#67](https://github.com/agritheory/check_run/issues/67)) ([4cdf7de](https://github.com/agritheory/check_run/commit/4cdf7de5d648bcd37cb19ce67d899804f7107ad3))
 * split checks by address ([f091550](https://github.com/agritheory/check_run/commit/f09155050ea8a64ee7fdb3ba8f3596eb936fd871))
 * validate docstatus of selected invoices in Check Run still saved/submitted ([9bf5605](https://github.com/agritheory/check_run/commit/9bf56054041c341fc23c4cdf0a9449ca32ef8ba5))
-
-
-
-
