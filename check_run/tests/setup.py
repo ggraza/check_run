@@ -11,7 +11,13 @@ from erpnext.setup.utils import enable_all_roles_and_domains, set_defaults_for_t
 from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
 from frappe.utils.data import add_days, flt
 
-from check_run.tests.fixtures import employees, suppliers, tax_authority
+from check_run.tests.fixtures import (
+	customers,
+	employees,
+	sales_tax_authorities,
+	sales_tax_templates,
+	suppliers,
+)
 
 
 def before_test():
@@ -75,6 +81,11 @@ def create_test_data():
 		settings.day = settings.day.replace(month=month)
 		create_payroll_journal_entry(settings)
 	create_manual_payment_entry(settings)
+	settings.day = frappe.utils.getdate().replace(month=1, day=1)
+	create_customers(settings)
+	modify_tax_templates(settings)
+	create_tax_payable_check_run_settings(settings)
+	create_sales_invoices(settings)
 
 
 def create_company_address(settings):
@@ -197,6 +208,45 @@ def setup_accounts():
 	)
 	update_account_number("1110 - Cash - CFC", "Petty Cash", account_number="1110")
 	update_account_number("Primary Checking - CFC", "Primary Checking", account_number="1201")
+	create_sales_tax_payable_account()
+
+
+def create_tax_payable_check_run_settings(settings):
+	bank_account = "Primary Checking - Local Bank"
+	pay_to_account = "2320 - Sales Tax Payable - CFC"
+	crs_name = frappe.db.get_value(
+		"Check Run Settings",
+		{"bank_account": bank_account, "pay_to_account": pay_to_account},
+	)
+	if crs_name:
+		crs = frappe.get_doc("Check Run Settings", crs_name)
+	else:
+		crs = frappe.new_doc("Check Run Settings")
+		crs.company = settings.company
+		crs.bank_account = bank_account
+		crs.pay_to_account = pay_to_account
+	crs.include_tax_payable = 1
+	crs.save()
+
+
+def create_sales_tax_payable_account():
+	company = frappe.defaults.get_defaults().get("company")
+	account_name = "2320 - Sales Tax Payable - CFC"
+	if frappe.db.exists("Account", account_name):
+		frappe.db.set_value("Account", account_name, "account_type", "Tax")
+		return
+	ap_parent = frappe.db.get_value(
+		"Account",
+		{"account_number": "2110", "company": company},
+		"parent_account",
+	)
+	account = frappe.new_doc("Account")
+	account.account_name = "Sales Tax Payable"
+	account.account_number = "2320"
+	account.account_type = "Tax"
+	account.company = company
+	account.parent_account = ap_parent
+	account.save()
 
 
 def create_payment_terms_templates(settings):
@@ -277,6 +327,26 @@ def create_payment_terms_templates(settings):
 					"credit_months": pt.credit_months,
 				},
 			)
+		doc.save()
+
+	if not frappe.db.exists("Payment Terms Template", "Due After Month End"):
+		pt = frappe.new_doc("Payment Term")
+		pt.payment_term_name = "Due After Month End"
+		pt.due_date_based_on = "Day(s) after the end of the invoice month"
+		pt.invoice_portion = 100
+		pt.credit_days = 28
+		pt.save()
+		doc = frappe.new_doc("Payment Terms Template")
+		doc.template_name = pt.name
+		doc.append(
+			"terms",
+			{
+				"payment_term": pt.name,
+				"invoice_portion": pt.invoice_portion,
+				"due_date_based_on": pt.due_date_based_on,
+				"credit_days": pt.credit_days,
+			},
+		)
 		doc.save()
 
 	if not frappe.db.exists("Payment Terms Template", "2% 10 Net 30"):
@@ -384,7 +454,7 @@ def create_payment_terms_templates(settings):
 
 def create_suppliers(settings):
 	addresses = frappe._dict({})
-	for supplier in suppliers + tax_authority:
+	for supplier in suppliers + sales_tax_authorities:
 		biz = frappe.new_doc("Supplier")
 		biz.supplier_name = supplier[0]
 		biz.supplier_group = "Services"
@@ -424,7 +494,9 @@ def create_suppliers(settings):
 
 
 def create_items(settings):
-	for supplier in suppliers + tax_authority:
+	for supplier in suppliers + sales_tax_authorities:
+		if frappe.db.exists("Item", supplier[1]):
+			continue
 		item = frappe.new_doc("Item")
 		item.item_code = item.item_name = supplier[1]
 		item.item_group = "Services"
@@ -936,7 +1008,7 @@ def create_payroll_journal_entry(settings):
 			"account": payable_account,
 			"cost_center": cost_center,
 			"party_type": "Supplier",
-			"party": tax_authority[0][0],
+			"party": sales_tax_authorities[0][0],
 			"account_currency": "USD",
 			"credit": total_payroll * 0.15,
 			"credit_in_account_currency": total_payroll * 0.15,
@@ -1045,3 +1117,98 @@ def create_manual_payment_entry(settings):
 
 	pe.save()
 	pe.submit()
+
+
+def create_customers(settings=None):
+	for customer in customers:
+		c = frappe.new_doc("Customer")
+		c.customer_name = customer[0]
+		c.customer_group = "Commercial"
+		c.customer_type = "Company"
+		c.territory = "United States"
+		c.save()
+
+		addr = frappe.new_doc("Address")
+		addr.address_title = f"{customer[0]} - {customer[1]['city']}"
+		addr.address_type = "Billing"
+		addr.address_line1 = customer[1]["address_line1"]
+		addr.city = customer[1]["city"]
+		addr.state = customer[1]["state"]
+		addr.country = customer[1]["country"]
+		addr.pincode = customer[1]["pincode"]
+		addr.append("links", {"link_doctype": "Customer", "link_name": c.name})
+		addr.save()
+
+
+def modify_tax_templates(settings=None):
+	for doctype in (
+		"Sales Taxes and Charges",
+		"Purchase Taxes and Charges",
+		"Item Tax Template Detail",
+		"Sales Taxes and Charges Template",
+		"Purchase Taxes and Charges Template",
+		"Item Tax Template",
+	):
+		frappe.db.truncate(doctype)
+	for account in ("ST 6.25% - CFC", "ST 4% - CFC", "ST 6% - CFC"):
+		frappe.delete_doc_if_exists("Account", account)
+	for st in sales_tax_templates:
+		frappe.get_doc(**st).insert()
+
+
+def create_sales_invoices(settings):
+	item = frappe.new_doc("Item")
+	item.item_code = "Cloudberry"
+	item.item_group = "Products"
+	item.stock_uom = "Nos"
+	item.maintain_stock = 1
+	item.is_sales_item = 1
+	item.is_sub_contracted_item, item.include_item_in_manufacturing = 0, 0
+	item.grant_commission = 0
+	item.is_purchase_item = 1
+	item.append(
+		"item_defaults",
+		{"company": settings.company, "default_warehouse": ""},
+	)
+	item.save()
+
+	se = frappe.new_doc("Stock Entry")
+	se.posting_date = settings.day
+	se.set_posting_time = 1
+	se.stock_entry_type = "Material Receipt"
+	se.append(
+		"items",
+		{
+			"item_code": "Cloudberry",
+			"t_warehouse": "Stores - CFC",
+			"qty": 1000,
+			"uom": "Nos",
+			"stock_uom": "Nos",
+			"conversion_factor": 1,
+			"basic_rate": 0.65,
+			"expense_account": "1910 - Temporary Opening - CFC",
+		},
+	)
+	se.save()
+	se.submit()
+
+	for customer in customers:
+		si = frappe.new_doc("Sales Invoice")
+		si.customer = customer[0]
+		si.set_posting_time = 1
+		si.company = settings.company
+		si.posting_date = settings.day
+		si.append("items", {"item_code": "Cloudberry", "qty": 100, "rate": 1.30})
+		si.taxes_and_charges = "MA Sales Tax - CFC"
+		# this API is typically only called from the browser
+		taxes = frappe.call(
+			"erpnext.controllers.accounts_controller.get_taxes_and_charges",
+			**{
+				"master_doctype": "Sales Taxes and Charges Template",
+				"master_name": si.taxes_and_charges,
+			},
+		)
+		for tax in taxes:
+			si.append("taxes", tax)
+		si.save()
+		si.submit()

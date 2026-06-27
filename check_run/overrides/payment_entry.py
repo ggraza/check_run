@@ -3,8 +3,12 @@
 
 import base64
 import copy
+import json
 
 import frappe
+from erpnext.accounts.doctype.invoice_discounting.invoice_discounting import (
+	get_party_account_based_on_invoice_discounting,
+)
 from erpnext.accounts.doctype.payment_entry.payment_entry import (
 	PaymentEntry,
 	add_regional_gl_entries,
@@ -21,10 +25,12 @@ from erpnext.accounts.general_ledger import (
 	validate_against_pcv,
 	validate_disabled_accounts,
 )
-from erpnext.accounts.utils import get_payment_ledger_entries, is_immutable_ledger_enabled
-from frappe import _, safe_decode
+from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_dimensions
+from erpnext.accounts import utils as accounts_utils
+from erpnext.accounts.utils import is_immutable_ledger_enabled
+from frappe import _, safe_decode, scrub
 from frappe.core.doctype.file.utils import get_local_image
-from frappe.utils import flt, get_link_to_form, now
+from frappe.utils import comma_and, comma_or, flt, get_link_to_form, now
 from frappe.utils.data import getdate
 
 
@@ -91,11 +97,83 @@ class CheckRunPaymentEntry(PaymentEntry):
 		if self.party_type == "Customer":
 			return ("Sales Order", "Sales Invoice", "Journal Entry", "Dunning")
 		elif self.party_type == "Supplier":
-			return ("Purchase Order", "Purchase Invoice", "Journal Entry")
+			return (
+				"Purchase Order",
+				"Purchase Invoice",
+				"Journal Entry",
+				"Sales Taxes and Charges",
+			)  # Tax Payable
 		elif self.party_type == "Shareholder":
 			return ("Journal Entry",)
 		elif self.party_type == "Employee":
 			return ("Journal Entry", "Expense Claim")  # Expense Claim
+
+	def validate_reference_documents(self):
+		valid_reference_doctypes = self.get_valid_reference_doctypes()
+
+		if not valid_reference_doctypes:
+			return
+
+		for d in self.get("references"):
+			if not d.allocated_amount:
+				continue
+			if d.reference_doctype not in valid_reference_doctypes:
+				frappe.throw(
+					_("Reference Doctype must be one of {0}").format(
+						comma_or(_(d) for d in valid_reference_doctypes)
+					)
+				)
+
+			elif d.reference_name:
+				if not frappe.db.exists(d.reference_doctype, d.reference_name):
+					frappe.throw(_("{0} {1} does not exist").format(d.reference_doctype, d.reference_name))
+				else:
+					ref_doc = frappe.get_doc(d.reference_doctype, d.reference_name)
+					if d.reference_doctype == "Sales Taxes and Charges":
+						if self.party != ref_doc.party:
+							frappe.throw(
+								_("{0} {1} is not associated with {2} {3}").format(
+									_(d.reference_doctype), d.reference_name, _(self.party_type), self.party
+								)
+							)
+					elif d.reference_doctype != "Journal Entry":
+						if self.party != ref_doc.get(scrub(self.party_type)):
+							frappe.throw(
+								_("{0} {1} is not associated with {2} {3}").format(
+									_(d.reference_doctype), d.reference_name, _(self.party_type), self.party
+								)
+							)
+					else:
+						self.validate_journal_entry()
+
+					if d.reference_doctype in frappe.get_hooks("invoice_doctypes"):
+						if self.party_type == "Customer":
+							ref_party_account = (
+								get_party_account_based_on_invoice_discounting(d.reference_name) or ref_doc.debit_to
+							)
+						elif self.party_type == "Supplier":
+							ref_party_account = ref_doc.credit_to
+						elif self.party_type == "Employee":
+							ref_party_account = ref_doc.payable_account
+
+						if (
+							ref_party_account != self.party_account
+							and not self.book_advance_payments_in_separate_party_account
+						):
+							frappe.throw(
+								_("{0} {1} is associated with {2}, but Party Account is {3}").format(
+									_(d.reference_doctype), d.reference_name, ref_party_account, self.party_account
+								)
+							)
+
+						if ref_doc.doctype == "Purchase Invoice" and ref_doc.get("on_hold"):
+							frappe.throw(
+								_("{0} {1} is on hold").format(_(d.reference_doctype), d.reference_name),
+								title=_("Invalid Purchase Invoice"),
+							)
+
+					if ref_doc.docstatus != 1:
+						frappe.throw(_("{0} {1} must be submitted").format(_(d.reference_doctype), d.reference_name))
 
 	"""
 	Because Check Run processes multiple payment entries in a background queue, errors generally do not include
@@ -155,20 +233,28 @@ class CheckRunPaymentEntry(PaymentEntry):
 		METHOD: validate_allocated_amount_with_latest_data
 		"""
 		if self.references:
-			unique_vouchers = {(x.reference_doctype, x.reference_name) for x in self.references}
+			unique_vouchers = {
+				(x.reference_doctype, x.reference_name)
+				for x in self.references
+				if x.reference_doctype != "Sales Taxes and Charges"
+			}
 			vouchers = [frappe._dict({"voucher_type": x[0], "voucher_no": x[1]}) for x in unique_vouchers]
-			latest_references = get_outstanding_reference_documents(
-				{
-					"posting_date": self.posting_date,
-					"company": self.company,
-					"party_type": self.party_type,
-					"payment_type": self.payment_type,
-					"party": self.party,
-					"party_account": self.paid_from if self.payment_type == "Receive" else self.paid_to,
-					"get_outstanding_invoices": True,
-					"get_orders_to_be_billed": True,
-					"vouchers": vouchers,
-				}
+			latest_references = (
+				get_outstanding_reference_documents(
+					{
+						"posting_date": self.posting_date,
+						"company": self.company,
+						"party_type": self.party_type,
+						"payment_type": self.payment_type,
+						"party": self.party,
+						"party_account": self.paid_from if self.payment_type == "Receive" else self.paid_to,
+						"get_outstanding_invoices": True,
+						"get_orders_to_be_billed": True,
+						"vouchers": vouchers,
+					}
+				)
+				if vouchers
+				else []
 			)
 
 			# Group latest_references by (voucher_type, voucher_no)
@@ -177,84 +263,86 @@ class CheckRunPaymentEntry(PaymentEntry):
 				d = frappe._dict(d)
 				latest_lookup.setdefault((d.voucher_type, d.voucher_no), frappe._dict())[d.payment_term] = d
 
-			for idx, d in enumerate(self.get("references"), start=1):
-				latest = latest_lookup.get((d.reference_doctype, d.reference_name)) or frappe._dict()
+		for idx, d in enumerate(self.get("references"), start=1):
+			if d.reference_doctype == "Sales Taxes and Charges":
+				continue
+			latest = latest_lookup.get((d.reference_doctype, d.reference_name)) or frappe._dict()
 
-				# If term based allocation is enabled, throw
-				if (
-					d.payment_term is None or d.payment_term == ""
-				) and self.term_based_allocation_enabled_for_reference(
-					d.reference_doctype, d.reference_name
-				):
-					frappe.throw(
-						_(
-							"{0} has Payment Term based allocation enabled. Select a Payment Term for Row #{1} in Payment References section"
-						).format(frappe.bold(d.reference_name), frappe.bold(idx))
-					)
-
-				# if no payment template is used by invoice and has a custom term(no `payment_term`), then invoice outstanding will be in 'None' key
-				latest = latest.get(d.payment_term) or latest.get(None)
-				# The reference has already been fully paid
-				if not latest:
-					frappe.throw(
-						_("{0} {1} has already been fully paid.").format(_(d.reference_doctype), d.reference_name)
-					)
-				# The reference has already been partly paid
-				elif (
-					latest.outstanding_amount < latest.invoice_amount
-					and flt(d.outstanding_amount, d.precision("outstanding_amount"))
-					!= flt(latest.outstanding_amount, d.precision("outstanding_amount"))
-					and d.payment_term == ""
-				):
-					frappe.throw(
-						_(
-							"{0} {1} has already been partly paid. Please use the 'Get Outstanding Invoice' or the 'Get Outstanding Orders' button to get the latest outstanding amounts."
-						).format(_(d.reference_doctype), d.reference_name)
-					)
-
-				fail_message = _(
-					"<b>Row #{1}</b> {0} / {2}: Allocated Amount of {3} cannot be greater than outstanding amount of {4}."
+			# If term based allocation is enabled, throw
+			if (
+				d.payment_term is None or d.payment_term == ""
+			) and self.term_based_allocation_enabled_for_reference(
+				d.reference_doctype, d.reference_name
+			):
+				frappe.throw(
+					_(
+						"{0} has Payment Term based allocation enabled. Select a Payment Term for Row #{1} in Payment References section"
+					).format(frappe.bold(d.reference_name), frappe.bold(idx))
 				)
 
-				if (
-					d.payment_term
-					and (
-						(flt(d.allocated_amount)) > 0
-						and latest.payment_term_outstanding
-						and (flt(d.allocated_amount) > flt(latest.payment_term_outstanding))
-					)
-					and self.term_based_allocation_enabled_for_reference(d.reference_doctype, d.reference_name)
-				):
-					frappe.throw(
-						_(
-							"Row #{0}: Allocated amount:{1} is greater than outstanding amount:{2} for Payment Term {3}"
-						).format(
-							d.idx, d.allocated_amount, latest.payment_term_outstanding, d.payment_term
-						)
-					)
+			# if no payment template is used by invoice and has a custom term(no `payment_term`), then invoice outstanding will be in 'None' key
+			latest = latest.get(d.payment_term) or latest.get(None)
+			# The reference has already been fully paid
+			if not latest:
+				frappe.throw(
+					_("{0} {1} has already been fully paid.").format(_(d.reference_doctype), d.reference_name)
+				)
+			# The reference has already been partly paid
+			elif (
+				latest.outstanding_amount < latest.invoice_amount
+				and flt(d.outstanding_amount, d.precision("outstanding_amount"))
+				!= flt(latest.outstanding_amount, d.precision("outstanding_amount"))
+				and d.payment_term == ""
+			):
+				frappe.throw(
+					_(
+						"{0} {1} has already been partly paid. Please use the 'Get Outstanding Invoice' or the 'Get Outstanding Orders' button to get the latest outstanding amounts."
+					).format(_(d.reference_doctype), d.reference_name)
+				)
 
-				if (flt(d.allocated_amount)) > 0 and flt(d.allocated_amount) > flt(latest.outstanding_amount):
-					frappe.throw(
-						fail_message.format(
-							self.party_name,
-							d.idx,
-							get_link_to_form(d.reference_doctype, d.reference_name),
-							d.allocated_amount,
-							d.outstanding_amount,
-						)
-					)
+			fail_message = _(
+				"<b>Row #{1}</b> {0} / {2}: Allocated Amount of {3} cannot be greater than outstanding amount of {4}."
+			)
 
-				# Check for negative outstanding invoices as well
-				if flt(d.allocated_amount) < 0 and flt(d.allocated_amount) < flt(latest.outstanding_amount):
-					frappe.throw(
-						fail_message.format(
-							self.party_name,
-							d.idx,
-							get_link_to_form(d.reference_doctype, d.reference_name),
-							d.allocated_amount,
-							d.outstanding_amount,
-						)
+			if (
+				d.payment_term
+				and (
+					(flt(d.allocated_amount)) > 0
+					and latest.payment_term_outstanding
+					and (flt(d.allocated_amount) > flt(latest.payment_term_outstanding))
+				)
+				and self.term_based_allocation_enabled_for_reference(d.reference_doctype, d.reference_name)
+			):
+				frappe.throw(
+					_(
+						"Row #{0}: Allocated amount:{1} is greater than outstanding amount:{2} for Payment Term {3}"
+					).format(
+						d.idx, d.allocated_amount, latest.payment_term_outstanding, d.payment_term
 					)
+				)
+
+			if (flt(d.allocated_amount)) > 0 and flt(d.allocated_amount) > flt(latest.outstanding_amount):
+				frappe.throw(
+					fail_message.format(
+						self.party_name,
+						d.idx,
+						get_link_to_form(d.reference_doctype, d.reference_name),
+						d.allocated_amount,
+						d.outstanding_amount,
+					)
+				)
+
+			# Check for negative outstanding invoices as well
+			if flt(d.allocated_amount) < 0 and flt(d.allocated_amount) < flt(latest.outstanding_amount):
+				frappe.throw(
+					fail_message.format(
+						self.party_name,
+						d.idx,
+						get_link_to_form(d.reference_doctype, d.reference_name),
+						d.allocated_amount,
+						d.outstanding_amount,
+					)
+				)
 
 
 def make_gl_entries(
@@ -309,10 +397,11 @@ def make_reverse_gl_entries(
 	adv_adj=False,
 	update_outstanding="Yes",
 	partial_cancel=False,
+	posting_date=None,
 	voided_date=None,  # CUSTOM CODE
 ):
 	"""
-	HASH: a2b6e4a1c587ce2f7e017f39944899f76e3e2f7d
+	HASH: 4436585aa07a82ab3704d8091fd99482854aa854
 	REPO: https://github.com/frappe/erpnext/
 	PATH: erpnext/accounts/general_ledger.py
 	METHOD: make_reverse_gl_entries
@@ -347,7 +436,12 @@ def make_reverse_gl_entries(
 		check_freezing_date(gl_entries[0]["posting_date"], adv_adj)
 
 		is_opening = any(d.get("is_opening") == "Yes" for d in gl_entries)
-		validate_against_pcv(is_opening, gl_entries[0]["posting_date"], gl_entries[0]["company"])
+
+		# For reverse entries, use the posting_date parameter if provided and valid
+		# Otherwise fall back to original posting_date
+		validation_date = posting_date if posting_date else gl_entries[0]["posting_date"]
+		validate_against_pcv(is_opening, validation_date, gl_entries[0]["company"])
+
 		if partial_cancel:
 			# Partial cancel is only used by `Advance` in separate account feature.
 			# Only cancel GL entries for unlinked reference using `voucher_detail_no`
@@ -416,6 +510,91 @@ def make_reverse_gl_entries(
 				make_entry(new_gle, adv_adj, "Yes")
 
 
+def tax_payable_gl_entries(gl_entries, company=None):
+	if not gl_entries:
+		return []
+	return [
+		gle
+		for gle in gl_entries
+		if gle.party_type
+		and gle.party
+		and frappe.db.exists(
+			"Check Run Settings",
+			{
+				"company": company or gle.get("company"),
+				"pay_to_account": gle.account,
+				"include_tax_payable": 1,
+			},
+		)
+	]
+
+
+def get_tax_payable_gl_entries_for_voucher(voucher_type, voucher_no):
+	crs = frappe.qb.DocType("Check Run Settings")
+	gle = frappe.qb.DocType("GL Entry")
+	return (
+		frappe.qb.from_(gle)
+		.inner_join(crs)
+		.on(
+			(gle.account == crs.pay_to_account)
+			& (gle.company == crs.company)
+			& (crs.include_tax_payable == 1)
+		)
+		.select(gle.star)
+		.where(gle.voucher_type == voucher_type)
+		.where(gle.voucher_no == voucher_no)
+		.where(gle.is_cancelled == 0)
+		.where(gle.party.isnotnull())
+		.where(gle.party_type.isnotnull())
+	).run(as_dict=True)
+
+
+def build_tax_payment_ledger_entries(gl_entries, cancel=0):
+	ple_map = []
+	for gle in gl_entries:
+		dr_or_cr = gle.credit - gle.debit
+		dr_or_cr_account_currency = gle.credit_in_account_currency - gle.debit_in_account_currency
+		if cancel:
+			dr_or_cr *= -1
+			dr_or_cr_account_currency *= -1
+
+		against_voucher_type = gle.against_voucher_type if gle.against_voucher_type else gle.voucher_type
+		against_voucher_no = gle.against_voucher if gle.against_voucher else gle.voucher_no
+
+		ple = frappe._dict(
+			doctype="Payment Ledger Entry",
+			posting_date=gle.posting_date,
+			company=gle.company,
+			account_type="Payable",
+			account=gle.account,
+			party_type=gle.party_type,
+			party=gle.party,
+			project=gle.project,
+			cost_center=gle.cost_center,
+			finance_book=gle.finance_book,
+			due_date=gle.due_date,
+			voucher_type=gle.voucher_type,
+			voucher_no=gle.voucher_no,
+			voucher_detail_no=gle.voucher_detail_no,
+			against_voucher_type=against_voucher_type,
+			against_voucher_no=against_voucher_no,
+			account_currency=gle.account_currency,
+			amount=dr_or_cr,
+			amount_in_account_currency=dr_or_cr_account_currency,
+			delinked=cancel,
+			remarks=gle.remarks,
+		)
+
+		dimensions_and_defaults = get_dimensions()
+		if dimensions_and_defaults:
+			for dimension in dimensions_and_defaults[0]:
+				ple[dimension.fieldname] = gle.get(dimension.fieldname)
+
+		ple_map.append(ple)
+
+	return ple_map
+
+
 def create_payment_ledger_entry(
 	gl_entries,
 	cancel=0,
@@ -426,25 +605,29 @@ def create_payment_ledger_entry(
 	voided_date=None,  # CUSTOM CODE
 ):
 	"""
-	HASH: f039bfe35a575272049534bac9aa771260691bde
+	HASH: 8c7a313a38dfe38c9e35ca41e91389bcfaed2404
 	REPO: https://github.com/frappe/erpnext/
 	PATH: erpnext/accounts/utils.py
 	METHOD: create_payment_ledger_entry
 	"""
 	if gl_entries:
-		ple_map = get_payment_ledger_entries(gl_entries, cancel=cancel)
+		ple_map = accounts_utils.get_payment_ledger_entries(gl_entries, cancel=cancel)
+		ple_map.extend(
+			build_tax_payment_ledger_entries(tax_payable_gl_entries(gl_entries), cancel=cancel)
+		)
 
 		for entry in ple_map:
 			ple = frappe.get_doc(entry)
 
 			if cancel:
-				delink_original_entry(ple, partial_cancel=partial_cancel, voided_date=voided_date)
-				if is_immutable_ledger_enabled():
+				if not is_immutable_ledger_enabled():
+					delink_original_entry(ple, partial_cancel=partial_cancel, voided_date=voided_date)
+					if voided_date:
+						ple.delinked = 0
+						ple.posting_date = voided_date
+				else:
 					ple.delinked = 0
 					ple.posting_date = frappe.form_dict.get("posting_date") or getdate()
-				elif voided_date:
-					ple.delinked = 0
-					ple.posting_date = voided_date
 
 			ple.flags.ignore_permissions = 1
 			ple.flags.adv_adj = adv_adj
@@ -455,7 +638,7 @@ def create_payment_ledger_entry(
 
 def delink_original_entry(pl_entry, partial_cancel=False, voided_date=None):  # CUSTOM CODE
 	"""
-	HASH: f039bfe35a575272049534bac9aa771260691bde
+	HASH: 8c7a313a38dfe38c9e35ca41e91389bcfaed2404
 	REPO: https://github.com/frappe/erpnext/
 	PATH: erpnext/accounts/utils.py
 	METHOD: delink_original_entry
@@ -502,7 +685,7 @@ def delink_original_entry(pl_entry, partial_cancel=False, voided_date=None):  # 
 		if partial_cancel:
 			query = query.where(ple.voucher_detail_no == pl_entry.voucher_detail_no)
 
-		if not (is_immutable_ledger_enabled() or voided_date):  # CUSTOM CODE
+		if not voided_date:  # CUSTOM CODE
 			query = query.set(ple.delinked, True)
 
 		query.run()
@@ -623,3 +806,52 @@ def set_voided_date(doctype, docname, voided_date):
 			title=_("Invalid Void As Of Date"),
 		)
 	frappe.db.set_value(doctype, docname, "voided_date", voided_date, update_modified=False)
+
+
+def validate_add_payment_term(doc: PaymentEntry, method: str | None = None):
+	doc = frappe._dict(json.loads(doc)) if isinstance(doc, str) else doc
+	if doc.check_run:
+		return
+	adjusted_refs = []
+	for r in doc.get("references"):
+		if r.reference_doctype == "Purchase Invoice" and not r.payment_term:
+			pmt_term = frappe.get_all(
+				"Payment Schedule",
+				{"parent": r.reference_name, "outstanding": [">", 0.0]},
+				["payment_term"],
+				order_by="due_date ASC",
+				limit=1,
+			)
+			if pmt_term:
+				r.payment_term = pmt_term[0].get("payment_term")
+				adjusted_refs.append(r.reference_name)
+	if adjusted_refs:
+		frappe.msgprint(
+			msg=frappe._(
+				f"An outstanding Payment Schedule term was detected and added for {comma_and(adjusted_refs)} in the references table.<br>Please review - "
+				"this field must be filled in for the Payment Schedule to synchronize and to prevent a paid invoice portion from showing up in a Check Run."
+			),
+			title=frappe._("Payment Schedule Term Added"),
+		)
+
+
+@frappe.whitelist()
+def update_sales_tax_payable_outstanding(doc, method=None):
+	for r in doc.get("references"):
+		if r.reference_doctype != "Sales Taxes and Charges":
+			continue
+		currently_outstanding = flt(
+			frappe.db.get_value("Sales Taxes and Charges", r.reference_name, "outstanding_amount")
+		)
+		if method == "on_submit":
+			new_outstanding = currently_outstanding - r.allocated_amount
+		elif method == "on_cancel":
+			new_outstanding = currently_outstanding + r.allocated_amount
+		else:
+			continue
+		frappe.db.set_value(
+			"Sales Taxes and Charges",
+			r.reference_name,
+			"outstanding_amount",
+			new_outstanding,
+		)

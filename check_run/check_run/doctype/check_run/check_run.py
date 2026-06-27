@@ -32,6 +32,41 @@ from check_run.check_run.doctype.check_run_settings.check_run_settings import (
 
 
 class CheckRun(Document):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+
+		ach_file_generated: DF.Check
+		amended_from: DF.Link | None
+		amount_check_run: DF.Currency
+		bank_account: DF.Link
+		beg_balance: DF.Currency
+		company: DF.Link
+		company_discretionary_data: DF.Data | None
+		end_date: DF.Date | None
+		final_check_number: DF.Int
+		initial_check_number: DF.Int
+		pay_to_account: DF.Link
+		posting_date: DF.Date | None
+		print_count: DF.Int
+		status: DF.Literal[
+			"Draft",
+			"Pending Approval",
+			"Approved",
+			"Submitting",
+			"Submitted",
+			"Ready to Print",
+			"Confirm Print",
+			"Printed",
+		]
+		transactions: DF.LongText | None
+
+	# end: auto-generated types
+
 	@frappe.read_only()
 	def onload(self) -> None:
 		if self.is_new():
@@ -142,6 +177,16 @@ class CheckRun(Document):
 
 	@frappe.read_only()
 	def not_outstanding_or_cancelled(self, transaction: dict) -> bool:
+		if transaction["doctype"] == "Sales Invoice":
+			# Tax payable: "name" is a Sales Taxes and Charges row, "ref_number" is the parent SI
+			si_docstatus = frappe.get_value("Sales Invoice", transaction.get("ref_number"), "docstatus")
+			if si_docstatus != 1:
+				return True
+			tax_outstanding = frappe.db.get_value(
+				"Sales Taxes and Charges", transaction["name"], "outstanding_amount"
+			)
+			return flt(tax_outstanding) == 0.0
+
 		filters = {
 			"name": transaction["name"]
 			if transaction["doctype"] != "Journal Entry"
@@ -191,7 +236,7 @@ class CheckRun(Document):
 		self.filter_transactions()
 		transactions = [
 			t
-			for t in json.loads(self.transactions)
+			for t in json.loads(self.transactions or "[]")
 			if t.get("pay") and not self.not_outstanding_or_cancelled(t)
 		]
 		if not len(transactions):
@@ -214,7 +259,7 @@ class CheckRun(Document):
 		frappe.db.sql("SAVEPOINT process_check_run")  # sql:ignore
 		try:
 			__transactions = self.transactions
-			_transactions = json.loads(__transactions)
+			_transactions = json.loads(__transactions or "[]")
 			transactions = sorted(
 				(frappe._dict(item) for item in _transactions if item.get("pay")), key=lambda x: x.party
 			)
@@ -242,7 +287,7 @@ class CheckRun(Document):
 		ach_payment_entries = list(
 			{
 				e.get("payment_entry")
-				for e in json.loads(self.transactions)
+				for e in json.loads(self.transactions or "[]")
 				if e.get("mode_of_payment") in electronic_mop
 			}
 		)
@@ -323,6 +368,8 @@ class CheckRun(Document):
 					party = frappe.db.get_value("Expense Claim", group[0].name, "employee")
 				elif group[0].doctype == "Journal Entry":
 					party = frappe.db.get_value("Journal Entry Account", group[0].name, "party")
+				elif group[0].doctype == "Sales Invoice":
+					party = group[0].party
 				pe = frappe.new_doc("Payment Entry")
 				pe.payment_type = "Pay"
 				pe.posting_date = (
@@ -370,12 +417,18 @@ class CheckRun(Document):
 
 					if reference.doctype == "Journal Entry":
 						reference_name = reference.ref_number
+					elif reference.doctype == "Sales Invoice":
+						# Tax payable: "name" is the Sales Taxes and Charges row name
+						reference_name = reference.name
 					else:
 						reference_name = reference.name or reference.ref_number
+
 					pe.append(
 						"references",
 						{
-							"reference_doctype": reference.doctype,
+							"reference_doctype": reference.doctype
+							if reference.doctype != "Sales Invoice"
+							else "Sales Taxes and Charges",
 							"reference_name": reference_name,
 							"due_date": reference.get("due_date"),
 							"outstanding_amount": flt(reference.amount),
@@ -460,7 +513,7 @@ class CheckRun(Document):
 		if reprint_check_number and reprint_check_number != "undefined":
 			self.initial_check_number = int(reprint_check_number)
 		output = PdfWriter()
-		transactions = json.loads(self.transactions)
+		transactions = json.loads(self.transactions or "[]")
 		check_increment = 0
 		_transactions = []
 		idx = 0
@@ -794,7 +847,43 @@ def get_entries(doc: CheckRun | str) -> dict:
 		.where(journal_entries.docstatus == 1)
 		.where(je_accounts.account == pay_to_account)
 		.where(journal_entries.due_date <= end_date)
-		.where((journal_entries.name).notin(sub_q))  # codespell:ignore
+		.where((journal_entries.name).notin(sub_q))
+	)
+
+	# build Sales Taxes and Charges query
+	sales_taxes = frappe.qb.DocType("Sales Taxes and Charges")
+	sales_invoice = frappe.qb.DocType("Sales Invoice")
+	st_qb = (
+		frappe.qb.from_(sales_taxes)
+		.inner_join(sales_invoice)
+		.on(sales_taxes.parent == sales_invoice.name)
+		.inner_join(suppliers)
+		.on(suppliers.name == sales_taxes.party)
+		.select(
+			ConstantColumn("Sales Invoice").as_("doctype"),
+			sales_taxes.party_type,
+			sales_taxes.name,
+			sales_taxes.parent.as_("ref_number"),
+			sales_taxes.party,
+			(sales_taxes.party).as_("party_name"),
+			(sales_taxes.tax_amount_after_discount_amount).as_("amount"),
+			Coalesce(sales_taxes.due_date, sales_invoice.posting_date).as_("due_date"),
+			sales_invoice.posting_date,
+			Coalesce(
+				NullIf(suppliers.supplier_default_mode_of_payment, ""),
+				f"{settings.tax_payable}" or "\n",
+			).as_("mode_of_payment"),
+			ConstantColumn("").as_("payment_term"),
+		)
+		.where(sales_invoice.company == company)
+		.where(sales_invoice.docstatus == 1)
+		.where(sales_taxes.account_head == pay_to_account)
+		.where(sales_invoice.posting_date <= end_date)
+		.where(
+			sales_taxes.outstanding_amount > 0.0
+			if settings and settings.allow_stand_alone_debit_notes == "No"
+			else sales_taxes.outstanding_amount != 0.0
+		)
 	)
 
 	if not settings:
@@ -805,8 +894,9 @@ def get_entries(doc: CheckRun | str) -> dict:
 			settings.include_purchase_invoices,
 			settings.include_expense_claims,
 			settings.include_journal_entries,
+			settings.include_tax_payable,
 		)
-		for flag, qb in zip(flags, (pi_qb, ec_qb, je_qb)):
+		for flag, qb in zip(flags, (pi_qb, ec_qb, je_qb, st_qb)):
 			if not flag:
 				continue
 			if not query:
